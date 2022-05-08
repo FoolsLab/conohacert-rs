@@ -30,6 +30,105 @@ fn is_same_domain(full_domain: &str, domain: &str) -> bool {
     }
 }
 
+fn get_domain_without_dot(domain_with_dot: &str) -> String {
+    let mut domain_without_dot = domain_with_dot.to_string();
+    domain_without_dot.pop();
+    domain_without_dot
+}
+
+async fn cleanup(
+    client: &ConohaClient,
+    domain_list: &conoha::dns::DomainListResponse,
+    full_domain: &str,
+    record_target: &str,
+) -> Result<(), Box<dyn error::Error>> {
+    for domain in &domain_list.domains {
+        let domain_without_dot = get_domain_without_dot(domain.name.as_str());
+
+        if !is_same_domain(full_domain, domain_without_dot.as_str()) {
+            continue;
+        }
+
+        let id = domain.id.unwrap();
+
+        let r: conoha::dns::RecordListResponse = client
+            .get(
+                format!(
+                    "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
+                    id.as_hyphenated().to_string()
+                )
+                .as_str(),
+            )
+            .await?;
+
+        for record in r.records {
+            if record.name.eq(record_target) {
+                println!("record \"{}\" will be deleted...", record.name);
+
+                client
+                    .delete(
+                        format!(
+                            "https://dns-service.tyo1.conoha.io/v1/domains/{}/records/{}",
+                            id.as_hyphenated().to_string(),
+                            record.id.unwrap().as_hyphenated().to_string(),
+                        )
+                        .as_str(),
+                    )
+                    .await?;
+            }
+            println!("finished");
+        }
+
+        break;
+    }
+
+    Ok(())
+}
+
+async fn auth(
+    client: &ConohaClient,
+    domain_list: &conoha::dns::DomainListResponse,
+    full_domain: &str,
+    record_target: &str,
+    validation_token: &str,
+) -> Result<(), Box<dyn error::Error>> {
+    for domain in &domain_list.domains {
+        let domain_without_dot = get_domain_without_dot(domain.name.as_str());
+
+        if !is_same_domain(full_domain, domain_without_dot.as_str()) {
+            continue;
+        }
+
+        let id = domain.id.unwrap();
+
+        let validation_record = Record {
+            name: record_target.to_string(),
+            record_type: "TXT".to_string(),
+            data: validation_token.to_string(),
+            ttl: Some(60),
+            ..Default::default()
+        };
+
+        println!("create {}", serde_json::to_string(&validation_record)?);
+
+        let res: serde_json::Value = client
+            .post(
+                format!(
+                    "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
+                    id.as_hyphenated().to_string(),
+                )
+                .as_str(),
+                &validation_record,
+            )
+            .await?;
+
+        println!("created {}", res.to_string());
+        break;
+    }
+
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -55,77 +154,26 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         )
         .await?;
 
-    let v: conoha::dns::DomainListResponse = client
+    let domain_list: conoha::dns::DomainListResponse = client
         .get("https://dns-service.tyo1.conoha.io/v1/domains")
         .await?;
 
-    for domain in v.domains {
-        let mut domain_without_dot = domain.name.clone();
-        domain_without_dot.pop();
-        let domain_without_dot = domain_without_dot;
-
-        if !is_same_domain(full_domain.as_str(), domain_without_dot.as_str()) {
-            continue;
-        }
-
-        let id = domain.id.unwrap();
-
-        if clenaup_mode {
-            let r: conoha::dns::RecordListResponse = client
-                .get(
-                    format!(
-                        "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
-                        id.as_hyphenated().to_string()
-                    )
-                    .as_str(),
-                )
-                .await?;
-
-            for record in r.records {
-                if record.name.eq(record_target.as_str()) {
-                    println!("record \"{}\" will be deleted...", record.name);
-
-                    client
-                        .delete(
-                            format!(
-                                "https://dns-service.tyo1.conoha.io/v1/domains/{}/records/{}",
-                                id.as_hyphenated().to_string(),
-                                record.id.unwrap().as_hyphenated().to_string(),
-                            )
-                            .as_str(),
-                        )
-                        .await?;
-                        
-                    println!("finished");
-                }
-            }
-        } else {
-            let validation_record = Record {
-                name: record_target.clone(),
-                record_type: "TXT".to_string(),
-                data: validation_token.clone(),
-                ttl: Some(60),
-                ..Default::default()
-            };
-
-            println!("create {}", serde_json::to_string(&validation_record)?);
-
-            let res: serde_json::Value = client
-                .post(
-                    format!(
-                        "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
-                        id.as_hyphenated().to_string(),
-                    )
-                    .as_str(),
-                    &validation_record,
-                )
-                .await?;
-
-            println!("{}", res.to_string());
-            break;
-        }
-
-        break;
+    if clenaup_mode {
+        cleanup(
+            &client,
+            &domain_list,
+            full_domain.as_str(),
+            record_target.as_str(),
+        )
+        .await?;
+    } else {
+        auth(
+            &client,
+            &domain_list,
+            full_domain.as_str(),
+            record_target.as_str(),
+            validation_token.as_str(),
+        ).await?;
     }
 
     Ok(())
