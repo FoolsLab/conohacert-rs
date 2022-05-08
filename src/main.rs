@@ -80,8 +80,8 @@ async fn cleanup(
                     .as_str(),
                 )
                 .await?;
+            println!("finished");
         }
-        println!("finished");
     }
 
     Ok(())
