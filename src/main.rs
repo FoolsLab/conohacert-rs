@@ -1,6 +1,9 @@
 mod conoha;
 
-use conoha::{dns::Record, ConohaClient};
+use conoha::{
+    dns::{Domain, Record},
+    ConohaClient,
+};
 use serde_derive::{Deserialize, Serialize};
 use std::{env, error};
 
@@ -18,16 +21,10 @@ struct ConohaIdConfig {
 }
 
 fn is_same_domain(full_domain: &str, domain: &str) -> bool {
-    if domain.eq(full_domain) {
-        true
-    } else if regex::Regex::new(format!(r"\.{}$", domain).as_str())
-        .unwrap()
-        .is_match(full_domain)
-    {
-        true
-    } else {
-        false
-    }
+    domain.eq(full_domain)
+        || regex::Regex::new(format!(r"\.{}$", domain).as_str())
+            .unwrap()
+            .is_match(full_domain)
 }
 
 fn get_domain_without_dot(domain_with_dot: &str) -> String {
@@ -36,50 +33,55 @@ fn get_domain_without_dot(domain_with_dot: &str) -> String {
     domain_without_dot
 }
 
-async fn cleanup(
-    client: &ConohaClient,
+fn search_correspond_domain_id(
     domain_list: &conoha::dns::DomainListResponse,
     full_domain: &str,
-    record_target: &str,
-) -> Result<(), Box<dyn error::Error>> {
+) -> Result<uuid::Uuid, String> {
     for domain in &domain_list.domains {
         let domain_without_dot = get_domain_without_dot(domain.name.as_str());
 
-        if !is_same_domain(full_domain, domain_without_dot.as_str()) {
-            continue;
+        if is_same_domain(full_domain, domain_without_dot.as_str()) {
+            return Ok(domain.id.unwrap());
         }
+    }
 
-        let id = domain.id.unwrap();
+    Err(format!(
+        "domain item corresponds {} was not found",
+        full_domain
+    ))
+}
 
-        let r: conoha::dns::RecordListResponse = client
-            .get(
-                format!(
-                    "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
-                    id.as_hyphenated().to_string()
-                )
-                .as_str(),
+async fn cleanup(
+    client: &ConohaClient,
+    domain_id: &uuid::Uuid,
+    target_record_name: &str,
+) -> Result<(), Box<dyn error::Error>> {
+    let r: conoha::dns::RecordListResponse = client
+        .get(
+            format!(
+                "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
+                domain_id.as_hyphenated().to_string()
             )
-            .await?;
+            .as_str(),
+        )
+        .await?;
 
-        for record in r.records {
-            if record.name.eq(record_target) {
-                println!("record \"{}\" will be deleted...", record.name);
+    for record in r.records {
+        if record.name.eq(target_record_name) {
+            println!("record \"{}\" will be deleted...", record.name);
 
-                client
-                    .delete(
-                        format!(
-                            "https://dns-service.tyo1.conoha.io/v1/domains/{}/records/{}",
-                            id.as_hyphenated().to_string(),
-                            record.id.unwrap().as_hyphenated().to_string(),
-                        )
-                        .as_str(),
+            client
+                .delete(
+                    format!(
+                        "https://dns-service.tyo1.conoha.io/v1/domains/{}/records/{}",
+                        domain_id.as_hyphenated().to_string(),
+                        record.id.unwrap().as_hyphenated().to_string(),
                     )
-                    .await?;
-            }
-            println!("finished");
+                    .as_str(),
+                )
+                .await?;
         }
-
-        break;
+        println!("finished");
     }
 
     Ok(())
@@ -87,44 +89,32 @@ async fn cleanup(
 
 async fn auth(
     client: &ConohaClient,
-    domain_list: &conoha::dns::DomainListResponse,
-    full_domain: &str,
-    record_target: &str,
+    domain_id: &uuid::Uuid,
+    target_record_name: &str,
     validation_token: &str,
 ) -> Result<(), Box<dyn error::Error>> {
-    for domain in &domain_list.domains {
-        let domain_without_dot = get_domain_without_dot(domain.name.as_str());
+    let validation_record = Record {
+        name: target_record_name.to_string(),
+        record_type: "TXT".to_string(),
+        data: validation_token.to_string(),
+        ttl: Some(60),
+        ..Default::default()
+    };
 
-        if !is_same_domain(full_domain, domain_without_dot.as_str()) {
-            continue;
-        }
+    println!("create {}", serde_json::to_string(&validation_record)?);
 
-        let id = domain.id.unwrap();
-
-        let validation_record = Record {
-            name: record_target.to_string(),
-            record_type: "TXT".to_string(),
-            data: validation_token.to_string(),
-            ttl: Some(60),
-            ..Default::default()
-        };
-
-        println!("create {}", serde_json::to_string(&validation_record)?);
-
-        let res: serde_json::Value = client
-            .post(
-                format!(
-                    "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
-                    id.as_hyphenated().to_string(),
-                )
-                .as_str(),
-                &validation_record,
+    let res: serde_json::Value = client
+        .post(
+            format!(
+                "https://dns-service.tyo1.conoha.io/v1/domains/{}/records",
+                domain_id.as_hyphenated().to_string(),
             )
-            .await?;
+            .as_str(),
+            &validation_record,
+        )
+        .await?;
 
-        println!("created {}", res.to_string());
-        break;
-    }
+    println!("created {}", res.to_string());
 
     Ok(())
 }
@@ -141,8 +131,6 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let full_domain = args[2].clone();
     let validation_token = args[3].clone();
 
-    let record_target = format!("_acme-challenge.{}.", full_domain);
-
     let config: AppConfig = confy::load_path("config.toml")?;
 
     let client = ConohaClient::new()?
@@ -154,26 +142,24 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         )
         .await?;
 
+    let record_target = format!("_acme-challenge.{}.", full_domain);
+
     let domain_list: conoha::dns::DomainListResponse = client
         .get("https://dns-service.tyo1.conoha.io/v1/domains")
         .await?;
 
+    let domain_item_id = search_correspond_domain_id(&domain_list, full_domain.as_str())?;
+
     if clenaup_mode {
-        cleanup(
-            &client,
-            &domain_list,
-            full_domain.as_str(),
-            record_target.as_str(),
-        )
-        .await?;
+        cleanup(&client, &domain_item_id, record_target.as_str()).await?;
     } else {
         auth(
             &client,
-            &domain_list,
-            full_domain.as_str(),
+            &domain_item_id,
             record_target.as_str(),
             validation_token.as_str(),
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(())
