@@ -2,7 +2,8 @@
 
 1. run `cargo build --release`
 2. download `cacert.pem` from somewhere (e.g. https://curl.se/docs/caextract.html) and place it on this directory
-3. run 
+3. copy `config.example.toml` to `config.toml` and rewrite it
+4. run 
 ```
 sudo certbot certonly \
     -d hoge.example.com \
