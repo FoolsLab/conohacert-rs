@@ -5,7 +5,7 @@ use conoha::{
     ConohaClient,
 };
 use serde_derive::{Deserialize, Serialize};
-use std::{env, error};
+use std::{env, error,thread,time};
 
 #[derive(Default, Serialize, Deserialize)]
 struct AppConfig {
@@ -160,6 +160,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
             validation_token.as_str(),
         )
         .await?;
+        thread::sleep(time::Duration::from_secs(60));
     }
 
     Ok(())
